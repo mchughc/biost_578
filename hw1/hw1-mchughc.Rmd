@@ -1,0 +1,48 @@
+HW1 Biost 578, Caitlin McHugh
+========================================================
+
+Homework 1 assignment is to find all HCV gene expression Illumina data, submitted by a Yale investigator. 
+
+I initially load in the SQLite database from GEO.
+```{r,cache=TRUE}
+source("http://bioconductor.org/biocLite.R")
+biocLite(c("GEOmetadb", "GEOquery"))
+library(GEOmetadb); library(GEOquery)
+library(RSQLite); library(data.table)
+getSQLiteFile()
+```
+
+I look at the names of the tables to identify which I want to use to find the HCV Illumina gene expression data.
+This query finds 85 gene expression samples from an investigator at Yale studying HCV. These 85 samples are from two different studies from the same investigator, and are those that are infected with HCV. The platform used is Illumina.
+```{r}
+rs <- dbGetQuery(geo_con,paste("select gsm.title,gsm.series_id,gpl.gpl,gpl.manufacturer,gpl.description",
+                               "from gsm join gpl on gsm.gpl=gpl.gpl",
+                               "where gpl.manufacturer like 'Illumina%'",
+                               "and gsm.description like '%HCV%'",
+                               "and gsm.contact like '%Yale University%'"))
+
+dim(rs); names(rs)
+rs
+```
+
+In order to perform the above query using the data.table package, I first convert all database tables from the GEO database to data.table objects using the `dbReadTable()' function.
+I then join them and perform the query on the joined tables.
+```{r}
+gsmTable <- dbReadTable(geo_con,"gsm")
+gsm <- data.table(gsmTable)
+
+gplTable <- dbReadTable(geo_con,"gpl")
+gpl <- data.table(gplTable)
+
+dim(gsm); dim(gpl)
+head(gsm); head(gpl)
+setkey(gsm,"gpl")
+setkey(gpl,"gpl")
+gsmGpl <- merge(gsm,gpl,all=TRUE)
+
+rsDT <- gsmGpl[manufacturer %like% "Illumina" &
+                 description.x %like% "HCV" & contact.x %like% "Yale University",
+               list(title.x,series_id,gpl,manufacturer,description.y)]
+dim(rsDT); names(rsDT)
+rsDT
+```
