@@ -1,0 +1,109 @@
+HW2 Biost 578, Caitlin McHugh
+========================================================
+
+To reproduce Figure 2 from the referenced paper, I download the expression data, and perform two different LIMMA analyses on the expression levels. The first analysis compares the macrophage mock samples to the poly IC samples, and selects those with an FDR adjusted p-value less than 0.05 and a fold change greater than 1.5. From these probe sets, I identify the probes that have an unadjusted p-value of less than 0.1, when comparing the poly expression levels among negative samples to the poly expression levels among positive samples. The identified 43 probe set expression levels are plotted in a heatmap fashion.
+
+I initially load in the SQLite database from GEO.
+```{r,cache=TRUE}
+source("http://bioconductor.org/biocLite.R")
+biocLite(c("GEOmetadb", "GEOquery"))
+library(GEOmetadb); library(GEOquery)
+library(Biobase)
+library(RSQLite); library(data.table)
+library(statmod)
+```
+
+I query the database to find the samples from the paper we desire. I use the PubMed id to access the exact samples we want to get, which was found from the paper I read online.
+```{r,eval=FALSE}
+getSQLiteFile()
+geo_con <- dbConnect(SQLite(),'GEOmetadb.sqlite')
+res <- dbGetQuery(geo_con, "SELECT gsm.gsm, gse.gse, gsm.supplementary_file FROM (gse JOIN gse_gsm ON gse.gse=gse_gsm.gse) j JOIN gsm ON j.gsm=gsm.gsm WHERE gse.pubmed_id='23220997';")
+unique(res$gse.gse)
+```
+
+So it's GSE40812. We download the raw data for this study.
+```{r query-GEO, cache = TRUE}
+# Download the mapping information and processed data
+# This returns a list of eSets
+GSE40812_set <- getGEO("GSE40812")[[1]]
+dim(GSE40812_set)
+phenoData(GSE40812_set)
+dim(fData(GSE40812_set)) # 47323 30
+```
+We see that there are 80 samples in these data, but we have to be sure to select the ones we want for our analysis. 
+
+We want to parse out the pertinent information from the phenoData for this study. First, we parse out the sample id, treatment (mock vs poly IC) and HCV status (positive vs negative).
+Then we subset to only the macrophage samples.
+```{r}
+library(limma)
+gse_new <- GSE40812_set
+names(pData(gse_new))
+pd <- pData(gse_new)[,c("title","characteristics_ch1.1","characteristics_ch1.2","description")]
+names(pd) <- c("ptid","typ","treat","status")
+
+idSt <- regexpr("_",pData(GSE40812_set)$title)
+pd$ptid <- substr(pData(GSE40812_set)$title,start=idSt+1,stop=idSt+4)
+
+treat <- gsub(".*: ","",pData(GSE40812_set)$characteristics_ch1.2)
+pd$treat <- treat
+pd$treat[is.element(treat,c("Poly IC H","Poly IC L"))] <- "Poly"
+
+typ <- gsub(".*: ","",pData(GSE40812_set)$characteristics_ch1.1)
+pd$typ <- typ
+
+status <- gsub(".*: ","",pData(GSE40812_set)$description)
+pd$status <- status
+pd$status[grepl("HCV-positive",pd$status)] <- "pos"
+pd$status[grepl("HCV-negative",pd$status)] <- "neg"  
+
+pData(gse_new) <- pd
+
+gse_new <- gse_new[,pData(gse_new)$typ=="Monocyte-derived Macrophage"]
+dim(gse_new)
+```
+
+Now we are ready to run limma to estimate the fold changes between the mock treated and the poly IC samples. We find the 1,146 probes that have a FDR p-value of less than 0.05 and an absolute fold change greater than 1.5.
+```{r}
+mm <- model.matrix(~treat,gse_new)
+fit_mm <- lmFit(gse_new,mm)
+ebay_mm <- eBayes(fit_mm)
+colnames(fit_mm$coef)
+topT3 <- topTable(ebay_mm,coef="treatPoly",number=Inf,sort.by="none")
+ps <- topT3$adj.P.Val<0.05&abs(topT3$logFC)>log2(1.5)
+sum(ps) # 1146
+```
+
+We next compare the positive and negative HCV samples within these 1,146 probes. We compare the difference of the poly and mock expression levels among samples without HCV (negative) to the difference of the poly and mock expression levels among samples with HCV (positive) using a contrast.
+```{r}
+gse_sm <- gse_new[ps,]
+dim(gse_sm) # 1146 40
+
+treat <- factor(paste(pData(gse_sm)$status,pData(gse_sm)$treat,sep="."))
+mm <- model.matrix(~0+treat)
+colnames(mm)[5:23] <- paste("ptid.",unique(pData(gse_sm)$ptid),sep="")
+fit_mm <- lmFit(gse_sm,mm)
+cm <- makeContrasts(allL=treatPoly.neg-treatMock.neg-treatPoly.pos+treatMock.pos,levels=mm)
+tp2 <- topTable(fit2,coef="allL",number=Inf,sort.by="none")
+sum(tp2$P.Value<0.1) # 43
+```
+
+Now we need to make the heat map plot of these 43 genes with an unadjusted p-value of less than 0.1. We order the samples in numerical order, first plotting the mock then the poly samples, as was done in Figure 2 in the paper.
+```{r}
+library(pheatmap)
+mat <- gse_sm[tp2$P.Value<0.1,]
+dim(mat) # 43 40
+# want to reorder in mock-, mock+, poly-, poly+ as have in the figure in the paper
+ids <- c(2014,2046:2054,3049:3050,3052:3059)
+pData(mat)$idTrt <- paste(pData(mat)$ptid,pData(mat)$treat,sep=".")
+ordPlMock <- match(paste(ids,"Mock",sep="."),pData(mat)$idTrt)
+ordPlPoly <- match(paste(ids,"Poly",sep="."),pData(mat)$idTrt)
+
+matPl <- mat[,c(ordPlMock,ordPlPoly)]
+colnames(matPl) <- pData(matPl)$idTrt
+```
+
+Which allows us to create our heatmap.
+```{r fig.width=7, fig.height=6}
+pheatmap(matPl,cluster_cols=FALSE,color=colorRampPalette(c("red", "orange", "yellow"))(50))
+```
+
