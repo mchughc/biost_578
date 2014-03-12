@@ -1,0 +1,122 @@
+HW3 Biost 578, Caitlin McHugh
+========================================================
+
+
+I initially install the required Bioconductor packages.
+```{r,eval=FALSE}
+source("http://bioconductor.org/biocLite.R")
+biocLite(c("GEOmetadb", "GEOquery"))
+```
+
+After installation, I load the required libraries.
+```{r}
+library(GEOmetadb); library(GEOquery)
+library(Biobase)
+```
+
+I query the database to find the samples from the paper we desire: Henn, A. D. et al. High-resolution temporal response patterns to influenza vaccine reveal a distinct human plasma cell gene signature. Scientific Reports 3, 2327 (2013). I use the GEO accession number to access the exact samples we want to get; it's GSE29617. We download the raw data for this study.
+```{r query-GEO, cache = TRUE}
+# Download the mapping information and processed data
+# This returns a list of eSets
+GSE_set <- getGEO("GSE29617")[[1]]
+dim(GSE_set) # 54715 80
+phenoData(GSE_set)
+dim(fData(GSE_set)) # 54715 16
+```
+
+We want to parse out the pertinent information from the phenoData for this study. First, we parse out the sample id and timepoints and store them in the phenoData as `subject' and `time.'
+```{r}
+names(pData(GSE_set))
+table(pData(GSE_set)$characteristics_ch1.1) # has subject ID
+table(pData(GSE_set)$characteristics_ch1.2) # has time point info
+
+pData(GSE_set)$subject <- gsub("subject id: ","",pData(GSE_set)$characteristics_ch1.1)
+pData(GSE_set)$time <- gsub("time point: ","",pData(GSE_set)$characteristics_ch1.2)
+
+names(pData(GSE_set)) # good
+```
+
+To run voom/limma, we first create an eSet we can use, including the phenoData from our GSE dataset.
+```{r}
+library(limma)
+# Note that I add one to the count
+new_set <- ExpressionSet(assayData = exprs(GSE_set)+1)
+pData(new_set) <- pData(GSE_set)
+```
+
+We now need to set-up our design matrix to estimate our weights, which includes variables for subject and the timepoints.
+```{r}
+design <- model.matrix(~subject+time, new_set)
+new_set_voom <- voom(new_set,design = design)
+```
+
+Finally, we are able to fit the model and extract the baseline and day 3 comparison, as well as the comparison of baseline with day 7.
+```{r}
+lm <- lmFit(new_set_voom, design)
+eb <- eBayes(lm)
+# Look at the other time-points
+t3 <- topTable(eb, coef = "timeD3", number = Inf)
+t7 <- topTable(eb,coef="timeD7",number=Inf)
+
+sum(t3$adj.P.Val<0.1) # 1392
+sum(t7$adj.P.Val<0.1) # 869
+sum(t3$adj.P.Val<0.1&t7$adj.P.Val<0.1) # 869
+```
+
+Now we need to make the heat map plot of these differentially expressed genes with an adjusted p-value of less than 0.1. We group the results by time point.
+```{r}
+library(pheatmap)
+PValue <- matrix(c(t3$logFC[t3$adj.P.Val<0.1],t7$logFC[t3$adj.P.Val<0.1]),ncol=2)
+rownames(PValue) <- rownames(t3)[t3$adj.P.Val<0.1]
+colnames(PValue) <- c("timeD3","timeD7")
+```
+
+We are finally able to display the results in a heatmap, grouping by time point.
+```{r fig.width=7, fig.height=6}
+pheatmap(PValue,cluster_cols=FALSE,color=colorRampPalette(c("red","white","blue"))(50))
+```
+
+Let's first download and install the package that we need for the GSEA analysis.
+```{r, eval=FALSE}
+library(BiocInstaller)
+biocLite("GSEABase")
+```
+
+We load the `GSEAbase` package for loading gene sets and convert the gene sets to gene indices.
+```{r}
+library(GSEABase)
+c2_set <- getGmt("msigdb.v4.0.symbols.gmt.txt")
+gene_ids <- geneIds(c2_set)
+# Camera requires gene-indices
+sets_indices <- symbols2indices(gene_ids, fData(GSE_set)[,"Gene Symbol"])
+```
+
+As with `limma`, we need to specify the contrast we wish to test at the set level.
+```{r}
+# Note that camera works on voom objects
+res <- vector("list",length = 2)
+ct <- 1
+for(i in c(3,7))
+  {
+  contrast <- paste0("timeD",i)
+  cont_matrix <- makeContrasts(contrast, levels=design)
+  res[[ct]] <- camera(new_set_voom, sets_indices, design=design, contrast=cont_matrix, sort=FALSE)
+  ct <- ct+1
+}
+```
+
+We set up the results for plotting with the pheatmap function.
+```{r}
+library(pheatmap)
+PValue <- sapply(res, function(x){ifelse(x$Direction=="Up", -10*log10(x$PValue), 10*log10(x$PValue))})
+rownames(PValue) <- rownames(res[[1]])
+PValue_max <- rowMax(abs(PValue))
+PValue_small <- PValue[PValue_max>30, ]
+anno <- data.frame(Time=paste0("timeD",c(3,7)))
+rownames(anno) <- colnames(PValue_small)  <- paste0("timeD",c(3,7))
+```
+
+We are finally able to display the results in a heatmap, grouping by time point.
+```{r fig.width=7, fig.height=6}
+pheatmap(PValue_small, cluster_cols=FALSE,show_rownames=FALSE)
+```
